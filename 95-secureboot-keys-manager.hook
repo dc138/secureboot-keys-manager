@@ -1,0 +1,11 @@
+[Trigger]
+Type = Package
+Operation = Upgrade
+Operation = Install
+Target = linux*
+Target = *-ucode
+
+[Action]
+Description = Sign efi executables for secure boot
+When = PostTransaction
+Exec = /bin/bash /sbin/secureboot-keys-manager sign
