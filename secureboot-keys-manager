@@ -1,0 +1,152 @@
+#!/bin/bash
+
+esp_dir=/efi
+config_dir=/etc/secureboot
+key_dir=$config_dir/keys
+out_dir=$config_dir/out
+cert_dir=$config_dir/certs
+
+function error() {
+  echo $@
+  exit 1
+}
+
+function require_set() {
+  if [[ -z $1 ]]; then
+    error "Unset config variable, refusing to continue"
+  fi
+}
+
+require_set $esp_dir
+require_set $config_dir
+require_set $key_dir
+require_set $cert_dir
+require_set $out_dir
+
+if [ "$(id -u)" -ne 0 ]; then
+  error "Please run as root"
+fi
+
+mkdir -p $config_dir
+mkdir -p $key_dir
+mkdir -p $key_dir/PK
+mkdir -p $key_dir/KEK
+mkdir -p $key_dir/db
+mkdir -p $key_dir/dbx
+mkdir -p $out_dir
+mkdir -p $out_dir/PK
+mkdir -p $out_dir/KEK
+mkdir -p $out_dir/db
+mkdir -p $out_dir/dbx
+mkdir -p $out_dir/certs
+mkdir -p $cert_dir
+
+function remove_keys() {
+  rm -f ${key_dir}/*/*
+  rm -f ${key_dir}/*.txt
+  rm -f ${cert_dir}/*.esl
+  rm -f ${cert_dir}/*.auth
+  rm -f ${config_dir}/.gen_done
+}
+
+function generate_keys() {
+  echo "Generating secure boot keys"
+
+  echo "  Generating PEM certificates"
+
+  2>/dev/null 1>&2 openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Secure Boot PK/"  -keyout ${key_dir}/PK/PK.key   -out ${key_dir}/PK/PK.crt   -days 3650 -nodes -sha256 && echo "    Wrote ${key_dir}/PK/PK.key"   && echo "    Wrote ${key_dir}/PK/PK.crt"
+  2>/dev/null 1>&2 openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Secure Boot KEK/" -keyout ${key_dir}/KEK/KEK.key -out ${key_dir}/KEK/KEK.crt -days 3650 -nodes -sha256 && echo "    Wrote ${key_dir}/KEK/KEK.key" && echo "    Wrote ${key_dir}/KEK/KEK.crt"
+  2>/dev/null 1>&2 openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Secure Boot DB/"  -keyout ${key_dir}/db/db.key   -out ${key_dir}/db/db.crt   -days 3650 -nodes -sha256 && echo "    Wrote ${key_dir}/db/db.key"   && echo "    Wrote ${key_dir}/db/BD.crt"
+
+  chmod 0600 ${key_dir}/*/*.key
+
+  echo "  Converting to DER certificates"
+
+  2>/dev/null 1>&2 openssl x509 -in ${key_dir}/PK/PK.crt   -out ${key_dir}/PK/PK.cer   -outform DER && echo "    Wrote ${key_dir}/PK/PK.cer"
+  2>/dev/null 1>&2 openssl x509 -in ${key_dir}/KEK/KEK.crt -out ${key_dir}/KEK/KEK.cer -outform DER && echo "    Wrote ${key_dir}/KEK/KEK.cer"
+  2>/dev/null 1>&2 openssl x509 -in ${key_dir}/db/db.crt   -out ${key_dir}/db/db.cer   -outform DER && echo "    Wrote ${key_dir}/db/db.cer"
+
+  GUID=$(uuidgen -r)
+  echo $GUID > ${key_dir}/GUID.txt
+
+  echo "  Generating EFI signature lists"
+
+  2>/dev/null 1>&2 cert-to-efi-sig-list -g $GUID ${key_dir}/PK/PK.crt   ${key_dir}/PK/PK.esl   && echo "    Wrote ${key_dir}/PK/PK.esl"
+  2>/dev/null 1>&2 cert-to-efi-sig-list -g $GUID ${key_dir}/KEK/KEK.crt ${key_dir}/KEK/KEK.esl && echo "    Wrote ${key_dir}/KEK/KEK.esl"
+  2>/dev/null 1>&2 cert-to-efi-sig-list -g $GUID ${key_dir}/db/db.crt   ${key_dir}/db/db.esl   && echo "    Wrote ${key_dir}/db/db.esl"
+
+  echo "  Generating authenticated EFI signature lists"
+
+  2>/dev/null 1>&2 sign-efi-sig-list -t "$(date --date='1 second' +'%Y-%m-%d %H:%M:%S')" -k ${key_dir}/PK/PK.key   -c ${key_dir}/PK/PK.crt PK   ${key_dir}/PK/PK.esl   ${key_dir}/PK/PK.auth   && echo "    Wrote ${key_dir}/PK/PK.auth"
+  2>/dev/null 1>&2 sign-efi-sig-list -t "$(date --date='1 second' +'%Y-%m-%d %H:%M:%S')" -k ${key_dir}/PK/PK.key   -c ${key_dir}/PK/PK.crt KEK  ${key_dir}/KEK/KEK.esl ${key_dir}/KEK/KEK.auth && echo "    Wrote ${key_dir}/KEK/KEK.auth"
+  2>/dev/null 1>&2 sign-efi-sig-list -t "$(date --date='1 second' +'%Y-%m-%d %H:%M:%S')" -k ${key_dir}/KEK/KEK.key -c ${key_dir}/KEK/KEK.crt db ${key_dir}/db/db.esl   ${key_dir}/db/db.auth   && echo "    Wrote ${key_dir}/db/db.auth"
+
+  echo "Signing external certificates"
+
+  for cert in ${cert_dir}/*.crt; do
+    cert_name=$(basename $cert | sed 's/\.crt//')
+    echo "  Found ${cert}"
+
+    if [[ ! -f ${cert_dir}/${cert_name}.txt ]]; then
+      error "    Cannot find uuid file ${cert_dir}/${cert_name}.txt"
+    fi
+
+    2>/dev/null 1>&2 sbsiglist --owner $(cat ${cert_dir}/${cert_name}.txt) --type x509 --output ${cert_dir}/${cert_name}.esl $cert && echo "    Wrote ${cert_dir}/${cert_name}.esl"
+    2>/dev/null 1>&2 sign-efi-sig-list -a -g $(cat ${cert_dir}/${cert_name}.txt) -k ${key_dir}/KEK/KEK.key -c ${key_dir}/KEK/KEK.crt db ${cert_dir}/${cert_name}.esl ${cert_dir}/${cert_name}.auth && echo "    Wrote ${cert_dir}/${cert_name}.auth"
+  done
+
+  echo "Moving files to export directory"
+
+  cp ${key_dir}/PK/PK.auth   ${out_dir}/PK/PK.auth    && echo "  Wrote ${out_dir}/PK/PK.auth"
+  cp ${key_dir}/KEK/KEK.auth ${out_dir}/KEK/KEK.auth  && echo "  Wrote ${out_dir}/KEK/KEK.auth"
+  cp ${key_dir}/db/db.auth   ${out_dir}/db/db.auth    && echo "  Wrote ${out_dir}/db/db.auth"
+
+  cp ${key_dir}/PK/PK.esl   ${out_dir}/PK/PK.esl    && echo "  Wrote ${out_dir}/PK/PK.esl"
+  cp ${key_dir}/KEK/KEK.esl ${out_dir}/KEK/KEK.esl  && echo "  Wrote ${out_dir}/KEK/KEK.esl"
+  cp ${key_dir}/db/db.esl   ${out_dir}/db/db.esl    && echo "  Wrote ${out_dir}/db/db.esl"
+
+  for auth in ${cert_dir}/*.auth; do
+    cp $auth "${out_dir}/certs/$(basename $auth)" && echo "  Wrote ${out_dir}/certs/$(basename $auth)"
+  done
+
+  touch ${config_dir}/.gen_done
+}
+
+function sign_efis() {
+  echo "Signing efi executables in ${esp_dir}"
+
+  for exe in $(find ${esp_dir} -type f -iname "*.efi"); do
+    2>/dev/null 1>&2 sbverify $exe --cert ${key_dir}/db/db.crt && echo "  Signature already valid for ${exe}" && continue || 2>/dev/null 1>&2 sbsign --key ${key_dir}/db/db.key --cert ${key_dir}/db/db.crt --output $exe $exe && echo "  Signed $exe"
+  done
+}
+
+function print_usage() {
+  echo "  secureboot-keys-manager help"
+  echo "  secureboot-keys-manager generate"
+  echo "  secureboot-keys-manager remove"
+  echo "  secureboot-keys-manager sign"
+}
+
+case $1 in
+  "generate")
+    remove_keys && generate_keys || error "Error generating keys"
+    ;;
+
+  "remove")
+    echo "Removing keys" && remove_keys
+    ;;
+
+  "sign")
+    [[ -f ${config_dir}/.gen_done ]] || generate_keys && sign_efis
+    ;;
+
+  "help")
+    echo "Avaiable options are:" && print_usage
+    ;;
+
+  *)
+    echo "Invalid usage, please do:" && print_usage && false
+    ;;
+esac
+
+# vim: set filetype=sh
