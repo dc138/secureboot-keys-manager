@@ -84,6 +84,8 @@ function generate_keys() {
   echo "Signing external certificates"
 
   for cert in ${cert_dir}/*.crt; do
+    [[ -f $cert ]] || continue;
+
     cert_name=$(basename $cert | sed 's/\.crt//')
     echo "  Found ${cert}"
 
@@ -106,6 +108,7 @@ function generate_keys() {
   cp ${key_dir}/db/db.esl   ${out_dir}/db/db.esl    && echo "  Wrote ${out_dir}/db/db.esl"
 
   for auth in ${cert_dir}/*.auth; do
+    [[ -f $auth ]] || continue;
     cp $auth "${out_dir}/certs/$(basename $auth)" && echo "  Wrote ${out_dir}/certs/$(basename $auth)"
   done
 
