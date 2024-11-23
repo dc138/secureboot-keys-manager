@@ -7,7 +7,7 @@ fi
 
 chmod +x ./secureboot-keys-manager
 
-cp ./secureboot-keys-manager /sbin
+cp ./secureboot-keys-manager /usr/bin
 cp ./95-secureboot-keys-manager.hook /etc/pacman.d/hooks
 
 echo "Installed files"

@@ -8,4 +8,4 @@ Target = *-ucode
 [Action]
 Description = Sign efi executables for secure boot
 When = PostTransaction
-Exec = /bin/bash /sbin/secureboot-keys-manager sign
+Exec = /bin/bash /usr/bin/secureboot-keys-manager sign
